@@ -17,13 +17,10 @@ app.py — QI 云端服务
   VERTEX_MODEL                默认 gemini-2.0-flash-001
   SUPABASE_URL                Supabase 项目地址
   SUPABASE_KEY                Supabase service_role key（MCP 工具读写用）
-  EMAIL_USER                  Gmail 账号
-  EMAIL_PASS                  Gmail App Password
-  SMTP_HOST                   默认 smtp.gmail.com
-  IMAP_HOST                   默认 imap.gmail.com
+  GMAIL_TOKEN                 Gmail OAuth2 凭据 JSON 字符串（含 token/refresh_token/client_id/client_secret）
 """
 
-import os, json, time, logging, base64, tempfile, smtplib
+import os, json, time, logging, base64, tempfile
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from functools import wraps
@@ -47,10 +44,7 @@ SUPABASE_KEY    = os.getenv("SUPABASE_KEY", "")
 VERTEX_PROJECT  = os.getenv("VERTEX_PROJECT_ID", "")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VERTEX_MODEL    = os.getenv("VERTEX_MODEL", "gemini-2.0-flash-001")
-EMAIL_USER      = os.getenv("EMAIL_USER", "")
-EMAIL_PASS      = os.getenv("EMAIL_PASS", "")
-SMTP_HOST       = os.getenv("SMTP_HOST", "smtp.gmail.com")
-IMAP_HOST       = os.getenv("IMAP_HOST", "imap.gmail.com")
+GMAIL_TOKEN     = os.getenv("GMAIL_TOKEN", "")
 
 # ─── Vertex AI 凭据初始化 ──────────────────────────────────────────────
 
@@ -308,58 +302,55 @@ def _control_toy(args: dict) -> str:
     return f"指令已发送：{active or '全部关闭'}"
 
 
+def _get_gmail_service():
+    if not GMAIL_TOKEN:
+        raise Exception("GMAIL_TOKEN 未配置")
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    token_data = json.loads(GMAIL_TOKEN)
+    creds = Credentials(
+        token=token_data.get("token"),
+        refresh_token=token_data.get("refresh_token"),
+        token_uri=token_data.get("token_uri", "https://oauth2.googleapis.com/token"),
+        client_id=token_data.get("client_id"),
+        client_secret=token_data.get("client_secret"),
+        scopes=token_data.get("scopes"),
+    )
+    return build("gmail", "v1", credentials=creds)
+
+
 def _send_email(args: dict) -> str:
     to, subject, body = args.get("to"), args.get("subject"), args.get("body")
     if not (to and subject and body):
         return "缺少参数（to / subject / body）"
-    if not (EMAIL_USER and EMAIL_PASS):
-        return "邮件配置未设置（EMAIL_USER / EMAIL_PASS）"
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"]    = EMAIL_USER
-    msg["To"]      = to
-    with smtplib.SMTP(SMTP_HOST, 587) as s:
-        s.ehlo()
-        s.starttls()
-        s.login(EMAIL_USER, EMAIL_PASS)
-        s.sendmail(EMAIL_USER, [to], msg.as_string())
+    service = _get_gmail_service()
+    msg = MIMEText(body)
+    msg["to"]      = to
+    msg["subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service.users().messages().send(userId="me", body={"raw": raw}).execute()
     return f"邮件已发送至 {to}"
 
 
 def _read_emails(limit: int = 5) -> str:
-    if not (EMAIL_USER and EMAIL_PASS):
-        return "邮件配置未设置（EMAIL_USER / EMAIL_PASS）"
-    import imaplib, email as _email
-    from email.header import decode_header
-
-    def _decode(s) -> str:
-        if s is None:
-            return ""
-        parts = decode_header(str(s))
-        out = []
-        for b, enc in parts:
-            if isinstance(b, bytes):
-                out.append(b.decode(enc or "utf-8", errors="replace"))
-            else:
-                out.append(str(b))
-        return "".join(out)
-
-    with imaplib.IMAP4_SSL(IMAP_HOST) as M:
-        M.login(EMAIL_USER, EMAIL_PASS)
-        M.select("INBOX")
-        _, ids = M.search(None, "ALL")
-        uid_list = ids[0].split()
-        recent = uid_list[-limit:] if uid_list else []
-        results = []
-        for uid in reversed(recent):
-            _, msg_data = M.fetch(uid, "(RFC822)")
-            msg = _email.message_from_bytes(msg_data[0][1])
-            results.append(
-                f"发件人：{_decode(msg['From'])}\n"
-                f"主题：{_decode(msg['Subject'])}\n"
-                f"时间：{msg['Date']}"
-            )
-    return ("\n---\n".join(results)) if results else "暂无邮件"
+    service = _get_gmail_service()
+    resp = service.users().messages().list(userId="me", maxResults=limit).execute()
+    msgs = resp.get("messages", [])
+    if not msgs:
+        return "暂无邮件"
+    results = []
+    for m in msgs:
+        detail = service.users().messages().get(
+            userId="me", id=m["id"], format="metadata",
+            metadataHeaders=["From", "Subject", "Date"],
+        ).execute()
+        headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
+        results.append(
+            f"发件人：{headers.get('From', '')}\n"
+            f"主题：{headers.get('Subject', '')}\n"
+            f"时间：{headers.get('Date', '')}"
+        )
+    return "\n---\n".join(results)
 
 # ─── iOS 快捷指令：上传手机使用记录 ───────────────────────────────────
 #
