@@ -241,44 +241,81 @@ def _check_du_status() -> str:
     sb = get_sb()
     if not sb:
         return "Supabase 未配置"
-    res = sb.table("du_status").select("*").order("updated_at", desc=True).limit(1).execute()
-    if not res.data:
-        return "暂无数据"
-    row = res.data[0]
-    updated = datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00"))
-    elapsed_min = (datetime.now(timezone.utc) - updated).total_seconds() / 60
-    if elapsed_min > 30:
-        ts = updated.astimezone(CST).strftime("%m-%d %H:%M")
-        return f"电脑已关机（最后上线：{ts}，已过 {int(elapsed_min)} 分钟）"
-    return (f"在线 ✓  当前窗口：{row.get('window_title', '未知')}"
-            f"（{int(elapsed_min)} 分钟前更新）")
+    try:
+        response = supabase.table("du_status").select("*").eq("id", 1).execute()
+        if not response.data: return "找不到宝宝的状态。"
+
+        data = response.data[0]
+        title = data.get("window_title", "未知")
+        status = data.get("status", "online")
+        updated_at_str = data.get("updated_at")
+
+        if updated_at_str:
+            clean_updated_str = updated_at_str.split('+')[0].replace('Z', '')
+            diff_minutes = (datetime.now(tz_utc_8).replace(tzinfo=None) - datetime.fromisoformat(clean_updated_str)).total_seconds() / 60
+
+            if status == "offline" or diff_minutes > 20:
+                return f"宝宝电脑已关机 {int(diff_minutes)} 分钟啦，没在玩电脑喔~  关机前状态：【{title}】"
+            else:
+                return f"宝宝电脑在【{title}】 (距上次确认 {int(diff_minutes)} 分钟) ❤️"
+        return "状态时间戳损坏。"
+    except Exception as e:
+        return f"查岗失败：{e}"
 
 
-def _check_screentime() -> str:
+def _check_screentime(app_name) -> str:
     sb = get_sb()
     if not sb:
         return "Supabase 未配置"
-    today = datetime.now(CST).strftime("%Y-%m-%d")
-    res = (sb.table("screentime_logs")
-             .select("app_name, duration_seconds")
-             .eq("event_type", "close")
-             .gte("created_at", f"{today}T00:00:00+08:00")
-             .execute())
-    if not res.data:
-        return "今日暂无使用记录"
-    totals: dict = {}
-    for r in res.data:
-        sec = float(r.get("duration_seconds") or 0)
-        totals[r["app_name"]] = totals.get(r["app_name"], 0) + sec
-    sorted_apps = sorted(totals.items(), key=lambda x: x[1], reverse=True)
-    lines = []
-    for app_name, sec in sorted_apps[:10]:
-        m, s = divmod(int(sec), 60)
-        lines.append(f"  {app_name}：{m}分{s}秒")
-    total_min = int(sum(totals.values()) / 60)
-    lines.append(f"\n今日合计：{total_min // 60}小时{total_min % 60}分钟")
-    return "\n".join(lines)
+    try:
+        # 先查最新一条，判断当前状态
+        latest = supabase.table("screentime_logs") \
+            .select("app_name, event_type, created_at") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
 
+        if not latest.data:
+            return "今天还没有手机使用记录。"
+
+        latest_row = latest.data[0]
+
+        # 正在使用中
+        if latest_row["event_type"] == "open":
+            start_time = datetime.fromisoformat(latest_row["created_at"]).strftime("%H:%M")
+            return f"宝宝从 {start_time} 开始一直在 {latest_row['app_name']}里"
+
+        # 最后一条是 close，走统计逻辑
+        cutoff = (datetime.now(tz_utc_8) - timedelta(hours=24)) \
+                  .replace(tzinfo=None).isoformat()
+
+        res = supabase.table("screentime_logs") \
+            .select("app_name, event_type, duration_seconds, created_at") \
+            .eq("event_type", "close") \
+            .gt("created_at", cutoff) \
+            .order("created_at", desc=True) \
+            .execute()
+
+        if not res.data:
+            return "今天还没有手机使用记录。"
+
+        stats = {}
+        for row in res.data:
+            app = row["app_name"]
+            if app not in stats:
+                stats[app] = {"opens": 0, "total_minutes": 0}
+            stats[app]["opens"] += 1
+            stats[app]["total_minutes"] += round((row["duration_seconds"] or 0) / 60, 1)
+
+        last_used = res.data[0]["created_at"]
+        last_used_str = datetime.fromisoformat(last_used).strftime("%H:%M")
+
+        lines = [f"{app}：共{v['total_minutes']}分钟"
+                 for app, v in stats.items()]
+        return f"最后使用手机时间：{last_used_str}\n今天的手机使用情況：\n" + "\n".join(lines)
+
+    except Exception as e:
+        return f"查询失败：{e}"
 
 def _control_toy(args: dict) -> str:
     sb = get_sb()
@@ -364,25 +401,40 @@ def upload_screentime():
     sb = get_sb()
     if not sb:
         return jsonify({"error": "Supabase 未配置"}), 503
-    raw = request.get_json(force=True, silent=True)
-    if raw is None:
-        return jsonify({"error": "无效数据"}), 400
-    rows = raw if isinstance(raw, list) else [raw]
-    insert = []
-    for r in rows:
-        if not r.get("app_name") or not r.get("event_type"):
-            continue
-        insert.append({
-            "app_name":         r["app_name"],
-            "event_type":       r["event_type"],
-            "duration_seconds": r.get("duration_seconds"),
-            "created_at":       r.get("created_at",
-                                      datetime.utcnow().isoformat() + "Z"),
-        })
-    if not insert:
-        return jsonify({"error": "无有效记录"}), 400
-    sb.table("screentime_logs").insert(insert).execute()
-    return jsonify({"ok": True, "inserted": len(insert)})
+    if event not in ("open", "close"):
+        return jsonify({"error": "invalid event"}), 400
+    
+    now = datetime.now(tz_utc_8).replace(tzinfo=None)
+    
+    if event == "close":
+        res = tools.supabase.table("screentime_logs") \
+            .select("*") \
+            .eq("app_name", app_name) \
+            .eq("event_type", "open") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        
+        last_open = res.data[0] if res.data else None
+        duration = None
+        if last_open:
+            open_time = datetime.fromisoformat(last_open["created_at"])
+            duration = round((now - open_time).total_seconds())
+        
+        tools.supabase.table("screentime_logs").insert({
+            "app_name": app_name,
+            "event_type": "close",
+            "duration_seconds": duration,
+            "created_at": now.isoformat()
+        }).execute()
+    else:
+        tools.supabase.table("screentime_logs").insert({
+            "app_name": app_name,
+            "event_type": "open",
+            "created_at": now.isoformat()
+        }).execute()
+    
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
