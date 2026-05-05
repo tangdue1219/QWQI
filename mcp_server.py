@@ -128,7 +128,7 @@ TOOLS = [
     {
         "name": "store_archive_memory",
         "description": (
-            "【永久档案】存储关于人物/关系/重要事实的长期不变信息。"
+            "【永久档案】存储关于我们/关系/重要事实的长期不变信息。"
             "category: partner=关于渡, self=关于棲自己, person=关于第三者, misc=其他"
         ),
         "inputSchema": {
@@ -187,7 +187,7 @@ TOOLS = [
     },
     {
         "name": "read_messages",
-        "description": "读取最近对话记录",
+        "description": "读最近对话记录",
         "inputSchema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 20}},
@@ -200,7 +200,7 @@ TOOLS = [
     },
     {
         "name": "read_book_chapter",
-        "description": "读取书籍某章内容",
+        "description": "读书籍某章内容",
         "inputSchema": {
             "type": "object",
             "required": ["book_id"],
