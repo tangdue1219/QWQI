@@ -53,7 +53,7 @@ def get_sb():
             _sb = create_client(url, key)
     return _sb
 
-# ── Embedding ──────────────────────────────────────────────────────────────
+# ── Embedding（bge-small-zh-v1.5，fastembed/ONNX，无需 PyTorch）───────────
 
 _embed_model = None
 
@@ -64,9 +64,9 @@ def get_embedding(text: str) -> list[float] | None:
         return None
     try:
         if _embed_model is None:
-            from sentence_transformers import SentenceTransformer
-            _embed_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
-        return _embed_model.encode(text, normalize_embeddings=True).tolist()
+            from fastembed import TextEmbedding
+            _embed_model = TextEmbedding("BAAI/bge-small-zh-v1.5")
+        return next(iter(_embed_model.embed([text]))).tolist()
     except Exception as e:
         print(f"[mcp] embedding 失败: {e}")
         return None
@@ -103,7 +103,7 @@ TOOLS = [
     },
     {
         "name": "read_diary",
-        "description": "读取最近的日记",
+        "description": "读最近的日记",
         "inputSchema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 8}},
@@ -129,7 +129,7 @@ TOOLS = [
         "name": "store_archive_memory",
         "description": (
             "【永久档案】存储关于我们/关系/重要事实的长期不变信息。"
-            "category: partner=关于渡, self=关于棲自己, person=关于第三者, misc=其他"
+            "category: partner=关于渡, self=关于自己, person=关于第三者, misc=其他"
         ),
         "inputSchema": {
             "type": "object",
@@ -256,7 +256,7 @@ TOOLS = [
     },
     {
         "name": "control_toy",
-        "description": "控制智能玩具（震动/吸吮/伸缩），数值 0 表示关闭",
+        "description": "控制玩具（震动/吸吮/伸缩），数值 0 表示关闭",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -514,7 +514,7 @@ def _list_books(args: dict) -> str:
     if not sb:
         return "Supabase 未配置"
     res = (sb.table("books")
-           .select("id,title,author,file_type,progress")
+           .select("id,title,author,total_chapters,progress")
            .order("created_at", desc=True)
            .limit(20)
            .execute())
@@ -522,7 +522,7 @@ def _list_books(args: dict) -> str:
     if not books:
         return "书架上没有书籍。"
     return "\n".join(
-        f"[id:{b['id']}] 《{b['title']}》- {b['author']} [{b['file_type']}] 进度{b['progress']}%"
+        f"[id:{b['id']}] 《{b['title']}》- {b['author']} 共{b['total_chapters']}章 进度{b['progress']}%"
         for b in books
     )
 
@@ -533,24 +533,26 @@ def _read_book_chapter(args: dict) -> str:
         return "Supabase 未配置"
     book_id = args.get("book_id", "")
     num     = int(args.get("chapter_num", 1))
-    res = sb.table("books").select("id,title,file_type,content").eq("id", book_id).single().execute()
-    if not res.data:
+    book_res = sb.table("books").select("title,total_chapters").eq("id", book_id).single().execute()
+    if not book_res.data:
         return f"找不到书籍 id={book_id}"
-    book = res.data
-    if book.get("file_type") == "pdf":
-        return f"《{book['title']}》是 PDF 格式，暂不支持文字读取。"
-    content  = book.get("content", "")
-    ch_re    = re.compile(r"第[一二三四五六七八九十百千万\d]+[章节卷]")
-    matches  = [(m.start(), m.group()) for m in ch_re.finditer(content)]
-    if not matches:
-        return f"《{book['title']}》\n{content[:1500]}{'…' if len(content)>1500 else ''}"
-    idx     = max(0, min(num - 1, len(matches) - 1))
-    start   = matches[idx][0]
-    end     = matches[idx+1][0] if idx+1 < len(matches) else len(content)
-    excerpt = content[start:min(start+2000, end)]
+    book = book_res.data
+    ch_res = (sb.table("book_chapters")
+              .select("title,content")
+              .eq("book_id", book_id)
+              .eq("chapter_num", num)
+              .single()
+              .execute())
+    if not ch_res.data:
+        return f"《{book['title']}》没有第{num}章（共{book['total_chapters']}章）"
+    ch = ch_res.data
+    content = ch.get("content", "")
+    ch_title = ch.get("title", f"第{num}章")
+    excerpt = content[:2000]
+    truncated = len(content) > 2000
     return (
-        f"《{book['title']}》{matches[idx][1]}（第{num}章/共{len(matches)}章）\n"
-        f"{excerpt}{'…（截断）' if end-start>2000 else ''}"
+        f"《{book['title']}》{ch_title}（第{num}章/共{book['total_chapters']}章）\n"
+        f"{excerpt}{'…（截断）' if truncated else ''}"
     )
 
 
@@ -650,23 +652,54 @@ def _check_screentime() -> str:
     if not sb:
         return "Supabase 未配置"
     today = datetime.now(TZ8).strftime("%Y-%m-%d")
+
+    # 最后上报时间
+    last_res = (sb.table("screentime_logs")
+                .select("created_at")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute())
+    last_line = ""
+    if last_res.data:
+        try:
+            last_ts = datetime.fromisoformat(last_res.data[0]["created_at"])
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=TZ8)
+            elapsed = (datetime.now(TZ8) - last_ts.astimezone(TZ8)).total_seconds() / 60
+            ts_str = last_ts.astimezone(TZ8).strftime("%H:%M")
+            if elapsed < 1:
+                last_line = f"手机最后活跃：刚刚（{ts_str}）"
+            elif elapsed < 60:
+                last_line = f"手机最后活跃：{int(elapsed)} 分钟前（{ts_str}）"
+            else:
+                last_line = f"手机最后活跃：{ts_str}（{int(elapsed/60)} 小时前）"
+        except Exception:
+            pass
+
+    # 各 App 今日时长
     res = (sb.table("screentime_logs")
            .select("app_name,duration_seconds")
            .eq("event_type", "close")
            .gte("created_at", f"{today}T00:00:00")
            .execute())
     if not res.data:
-        return "今日暂无使用记录"
+        return (last_line + "\n今日暂无使用记录").strip()
+
     totals: dict = {}
     for r in res.data:
         sec = float(r.get("duration_seconds") or 0)
         totals[r["app_name"]] = totals.get(r["app_name"], 0) + sec
+
     lines = []
-    for name, sec in sorted(totals.items(), key=lambda x: x[1], reverse=True)[:10]:
+    if last_line:
+        lines.append(last_line)
+    lines.append("今日各 App 使用时长：")
+    for name, sec in sorted(totals.items(), key=lambda x: x[1], reverse=True)[:15]:
         m, s = divmod(int(sec), 60)
-        lines.append(f"  {name}：{m}分{s}秒")
-    total_min = int(sum(totals.values()) / 60)
-    lines.append(f"\n今日合计：{total_min//60}小时{total_min%60}分钟")
+        lines.append(f"  {name}：{m}分{s}秒" if m else f"  {name}：{s}秒")
+    total_sec = int(sum(totals.values()))
+    total_h, total_m = divmod(total_sec // 60, 60)
+    lines.append(f"今日合计：{total_h}小时{total_m}分钟" if total_h else f"今日合计：{total_m}分钟")
     return "\n".join(lines)
 
 
