@@ -20,8 +20,11 @@ mcp_server.py — QI MCP 工具服务器
 角色约定：raw_conversations.role 用 du/qi（兼容旧 user/assistant）
 """
 
+from __future__ import annotations
+
 import os, json, uuid, re
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -58,7 +61,7 @@ def get_sb():
 _embed_model = None
 
 
-def get_embedding(text: str) -> list[float] | None:
+def get_embedding(text: str) -> Optional[list]:
     global _embed_model
     if not text:
         return None
