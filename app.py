@@ -397,12 +397,15 @@ def _read_emails(limit: int = 5) -> str:
 # 批量：[{...}, {...}]
 
 @app.post("/api/screentime")
-def upload_screentime():
+def upload_screentime(app_name):
     sb = get_sb()
     if not sb:
         return jsonify({"error": "Supabase 未配置"}), 503
+
+    event = request.args.get("event", "") 
     if event not in ("open", "close"):
         return jsonify({"error": "invalid event"}), 400
+      
     
     now = datetime.now(tz_utc_8).replace(tzinfo=None)
     
