@@ -131,8 +131,8 @@ TOOLS = [
     {
         "name": "store_archive_memory",
         "description": (
-            "【永久档案】存储关于我们/关系/重要事实的长期不变信息。"
-            "category: partner=关于渡, self=关于自己, person=关于第三者, misc=其他"
+            "【永久档案】存储关于我们/关系/重要事实的长期信息。"
+            "category: partner=我对渡的了解和认识, self=对自己的了解和感知变化, person=关于我们之间关系的发展变化, misc=其他"
         ),
         "inputSchema": {
             "type": "object",
