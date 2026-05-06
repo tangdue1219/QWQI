@@ -432,32 +432,38 @@ def push_screentime():
 
 # ── 模块二：iOS 自动化推送 App open/close 事件 + 电量 ─────────────────────
 
-@app.post("/push/app_event")
+@app.route("/push/app_event", methods=["GET", "POST"])
 def push_app_event():
     """
     iOS 自动化（每个 App「已打开」/「已关闭」触发）推送实时事件。
 
+    推荐用 URL 参数传递（最简单，不依赖 JSON 格式）：
+      https://域名/push/app_event?app=微信&event=open&battery=47
+
     快捷指令配置（每个 App 建两条自动化）：
       触发：微信「已打开」
         「取得电池电量」→ 变量 battery
-        「取得 URL 内容」POST https://域名/push/app_event
-          Body JSON: {"app": "微信", "event": "open", "battery": battery}
+        「取得 URL 内容」
+          URL: https://域名/push/app_event?app=微信&event=open&battery=battery变量
+          方式: GET
 
       触发：微信「已关闭」
         「取得电池电量」→ 变量 battery
-        「取得 URL 内容」POST https://域名/push/app_event
-          Body JSON: {"app": "微信", "event": "close", "battery": battery}
+        「取得 URL 内容」
+          URL: https://域名/push/app_event?app=微信&event=close&battery=battery变量
+          方式: GET
 
     battery 字段可选（没有也能工作），有的话顺带存电量。
     """
-    data = request.get_json(force=True, silent=True) or {}
+    # 同时支持 URL 参数（GET）和 JSON body（POST），URL 参数优先
+    data     = request.get_json(force=True, silent=True) or {}
+    app_name = (request.args.get("app") or data.get("app") or data.get("app_name") or "").strip()
+    event    = (request.args.get("event") or data.get("event") or "open").strip().lower()
+    battery  = request.args.get("battery") or data.get("battery")
+
     sb = get_sb()
     if not sb:
         return jsonify({"error": "Supabase 未配置"}), 500
-
-    app_name = (data.get("app") or data.get("app_name") or "").strip()
-    event    = (data.get("event") or "open").strip().lower()
-    battery  = data.get("battery")
 
     if not app_name:
         return jsonify({"error": "缺少 app 字段"}), 400
