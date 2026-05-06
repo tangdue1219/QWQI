@@ -2,9 +2,11 @@
 mcp_server.py — QI MCP 工具服务器
 
 端点：
-  GET  /         健康检查
-  GET  /tools    工具定义列表
-  POST /tools/call  执行工具
+  GET  /                健康检查
+  GET  /tools           工具定义列表
+  POST /tools/call      执行工具
+  POST /push/screentime 模块一：iOS 快捷指令定时推送今日 App 汇总时长
+  POST /push/app_event  模块二：iOS 自动化推送 App open/close 事件 + 电量
 
 工具列表：
   write_diary / read_diary
@@ -14,8 +16,13 @@ mcp_server.py — QI MCP 工具服务器
   add_memo
   read_messages / list_books / read_book_chapter
   log_period
-  check_du_status / check_screentime / control_toy
+  check_du_status / check_screentime / check_battery / control_toy
   send_email / read_emails
+
+Supabase 新增表（见末尾注释）：
+  screentime_daily  — 模块一每日汇总
+  app_events        — 模块二 open/close 事件流
+  battery_logs      — 电量上报
 
 角色约定：raw_conversations.role 用 du/qi（兼容旧 user/assistant）
 """
@@ -254,7 +261,12 @@ TOOLS = [
     },
     {
         "name": "check_screentime",
-        "description": "查看渡今日各 App 使用时长",
+        "description": "查看渡今日各 App 使用时长（模块一汇总）+ 当前实时状态（模块二）",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "check_battery",
+        "description": "查看渡手机当前电量",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -322,6 +334,117 @@ def call_tool():
         return jsonify({"error": str(e)}), 500
 
 
+
+# ── 模块一：iOS 快捷指令定时推送今日汇总 ──────────────────────────────────
+
+@app.post("/push/screentime")
+def push_screentime():
+    """
+    iOS 快捷指令（定时，如每小时/每天）推送今日各 App 汇总时长。
+
+    快捷指令配置：
+      1. 「取得今天的 App 与网站活动」
+      2. 「取得 URL 内容」POST https://域名/push/screentime
+         Body JSON: 上一步的「App 与网站活动」结果原样传入
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    sb = get_sb()
+    if not sb:
+        return jsonify({"error": "Supabase 未配置"}), 500
+    try:
+        today = datetime.now(TZ8).strftime("%Y-%m-%d")
+        apps = data.get("apps") or data.get("application") or []
+        if not isinstance(apps, list):
+            apps = []
+
+        # 删除今天已有的汇总再重写（保持幂等）
+        sb.table("screentime_daily") \
+          .delete() \
+          .eq("date", today) \
+          .execute()
+
+        rows = []
+        for item in apps:
+            name = (item.get("name") or item.get("bundleIdentifier") or "").strip()
+            duration = float(item.get("duration") or item.get("totalDuration") or 0)
+            if name and duration > 0:
+                rows.append({
+                    "id":               str(uuid.uuid4()),
+                    "date":             today,
+                    "app_name":         name,
+                    "duration_seconds": duration,
+                    "created_at":       now8(),
+                })
+        if rows:
+            sb.table("screentime_daily").insert(rows).execute()
+
+        _log("push_screentime", f"{today} 推送 {len(rows)} 条 App 时长")
+        return jsonify({"status": "ok", "apps_count": len(rows)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 模块二：iOS 自动化推送 App open/close 事件 + 电量 ─────────────────────
+
+@app.post("/push/app_event")
+def push_app_event():
+    """
+    iOS 自动化（每个 App「已打开」/「已关闭」触发）推送实时事件。
+
+    快捷指令配置（每个 App 建两条自动化）：
+      触发：微信「已打开」
+        「取得电池电量」→ 变量 battery
+        「取得 URL 内容」POST https://域名/push/app_event
+          Body JSON: {"app": "微信", "event": "open", "battery": battery}
+
+      触发：微信「已关闭」
+        「取得电池电量」→ 变量 battery
+        「取得 URL 内容」POST https://域名/push/app_event
+          Body JSON: {"app": "微信", "event": "close", "battery": battery}
+
+    battery 字段可选（没有也能工作），有的话顺带存电量。
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    sb = get_sb()
+    if not sb:
+        return jsonify({"error": "Supabase 未配置"}), 500
+
+    app_name = (data.get("app") or data.get("app_name") or "").strip()
+    event    = (data.get("event") or "open").strip().lower()
+    battery  = data.get("battery")
+
+    if not app_name:
+        return jsonify({"error": "缺少 app 字段"}), 400
+    if event not in ("open", "close"):
+        return jsonify({"error": "event 必须是 open 或 close"}), 400
+
+    try:
+        # 写入 app_events 事件流
+        sb.table("app_events").insert({
+            "id":         str(uuid.uuid4()),
+            "app_name":   app_name,
+            "event":      event,
+            "created_at": now8(),
+        }).execute()
+
+        # 如果带了电量，顺手写入 battery_logs
+        if battery is not None:
+            try:
+                level = int(float(str(battery).replace("%", "")))
+                sb.table("battery_logs").insert({
+                    "id":         str(uuid.uuid4()),
+                    "level":      level,
+                    "created_at": now8(),
+                }).execute()
+            except Exception:
+                pass
+
+        _log("push_app_event", f"{app_name} {event}")
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _dispatch(name: str, args: dict) -> str:
     handlers = {
         "write_diary":          _write_diary,
@@ -340,6 +463,7 @@ def _dispatch(name: str, args: dict) -> str:
         "log_period":           _log_period,
         "check_du_status":      lambda a: _check_du_status(),
         "check_screentime":     lambda a: _check_screentime(),
+        "check_battery":        lambda a: _check_battery(),
         "control_toy":          _control_toy,
         "send_email":           _send_email,
         "read_emails":          lambda a: _read_emails(int(a.get("limit", 5))),
@@ -654,56 +778,204 @@ def _check_screentime() -> str:
     sb = get_sb()
     if not sb:
         return "Supabase 未配置"
-    today = datetime.now(TZ8).strftime("%Y-%m-%d")
 
-    # 最后上报时间
-    last_res = (sb.table("screentime_logs")
-                .select("created_at")
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute())
-    last_line = ""
-    if last_res.data:
+    lines: list[str] = []
+
+    # ── 模块二：实时状态（app_events 最新一条）────────────────────────────
+    evt_res = (sb.table("app_events")
+               .select("app_name,event,created_at")
+               .order("created_at", desc=True)
+               .limit(2)
+               .execute())
+    events = evt_res.data or []
+
+    if events:
+        latest = events[0]
+        app_name = latest["app_name"]
+        event    = latest["event"]
         try:
-            last_ts = datetime.fromisoformat(last_res.data[0]["created_at"])
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=TZ8)
-            elapsed = (datetime.now(TZ8) - last_ts.astimezone(TZ8)).total_seconds() / 60
-            ts_str = last_ts.astimezone(TZ8).strftime("%H:%M")
-            if elapsed < 1:
-                last_line = f"手机最后活跃：刚刚（{ts_str}）"
-            elif elapsed < 60:
-                last_line = f"手机最后活跃：{int(elapsed)} 分钟前（{ts_str}）"
-            else:
-                last_line = f"手机最后活跃：{ts_str}（{int(elapsed/60)} 小时前）"
+            ts = datetime.fromisoformat(latest["created_at"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=TZ8)
+            ts_local   = ts.astimezone(TZ8)
+            elapsed    = (datetime.now(TZ8) - ts_local).total_seconds() / 60
+            ts_str     = ts_local.strftime("%H:%M")
         except Exception:
-            pass
+            ts_str, elapsed = "未知", 0
 
-    # 各 App 今日时长
-    res = (sb.table("screentime_logs")
-           .select("app_name,duration_seconds")
-           .eq("event_type", "close")
-           .gte("created_at", f"{today}T00:00:00")
+        if event == "open":
+            # 正在使用中
+            if elapsed < 1:
+                dur_str = "刚刚打开"
+            else:
+                dur_str = f"已使用 {int(elapsed)} 分钟"
+            lines.append(f"📱 正在使用：{app_name}（{ts_str} 打开，{dur_str}）")
+        else:
+            # 最后使用
+            # 尝试找对应的 open 事件计算本次时长
+            open_res = (sb.table("app_events")
+                        .select("created_at")
+                        .eq("app_name", app_name)
+                        .eq("event", "open")
+                        .lt("created_at", latest["created_at"])
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .execute())
+            dur_part = ""
+            if open_res.data:
+                try:
+                    open_ts = datetime.fromisoformat(open_res.data[0]["created_at"])
+                    if open_ts.tzinfo is None:
+                        open_ts = open_ts.replace(tzinfo=TZ8)
+                    close_ts = datetime.fromisoformat(latest["created_at"])
+                    if close_ts.tzinfo is None:
+                        close_ts = close_ts.replace(tzinfo=TZ8)
+                    used_min = int((close_ts - open_ts).total_seconds() / 60)
+                    open_str = open_ts.astimezone(TZ8).strftime("%H:%M")
+                    dur_part = f"{open_str}－{ts_str}，共 {used_min} 分钟"
+                except Exception:
+                    dur_part = f"关闭于 {ts_str}"
+            else:
+                dur_part = f"关闭于 {ts_str}"
+
+            if elapsed < 60:
+                ago = f"{int(elapsed)} 分钟前"
+            else:
+                ago = f"{int(elapsed/60)} 小时前"
+            lines.append(f"💤 最后使用：{app_name}（{dur_part}，{ago}）")
+    else:
+        lines.append("📵 暂无 App 使用记录（自动化还未触发过）")
+
+    # ── 电量（battery_logs 最新一条）────────────────────────────────────────
+    bat_res = (sb.table("battery_logs")
+               .select("level,created_at")
+               .order("created_at", desc=True)
+               .limit(1)
+               .execute())
+    if bat_res.data:
+        level = bat_res.data[0]["level"]
+        if level <= 10:
+            bat_emoji = "🪫"
+        elif level <= 30:
+            bat_emoji = "🔋⚠️"
+        else:
+            bat_emoji = "🔋"
+        lines.append(f"{bat_emoji} 电量：{level}%")
+    else:
+        lines.append("🔋 电量：暂无数据")
+
+    # ── 分隔线 ───────────────────────────────────────────────────────────────
+    lines.append("")
+    lines.append("── 今日各 App 使用时长 ──")
+
+    # ── 模块一：今日汇总（screentime_daily）────────────────────────────────
+    today = datetime.now(TZ8).strftime("%Y-%m-%d")
+    daily_res = (sb.table("screentime_daily")
+                 .select("app_name,duration_seconds")
+                 .eq("date", today)
+                 .execute())
+    daily = daily_res.data or []
+
+    if not daily:
+        # 兼容旧 screentime_logs 表
+        old_res = (sb.table("screentime_logs")
+                   .select("app_name,duration_seconds")
+                   .eq("event_type", "close")
+                   .gte("created_at", f"{today}T00:00:00")
+                   .execute())
+        daily = old_res.data or []
+
+    if daily:
+        totals: dict = {}
+        for r in daily:
+            sec = float(r.get("duration_seconds") or 0)
+            totals[r["app_name"]] = totals.get(r["app_name"], 0) + sec
+        for name, sec in sorted(totals.items(), key=lambda x: x[1], reverse=True)[:15]:
+            m, s = divmod(int(sec), 60)
+            lines.append(f"  {name}：{m}分{s}秒" if m else f"  {name}：{s}秒")
+        total_sec = int(sum(totals.values()))
+        th, tm = divmod(total_sec // 60, 60)
+        lines.append(f"今日合计：{th}小时{tm}分钟" if th else f"今日合计：{tm}分钟")
+    else:
+        # 尝试从 app_events 自己算今日时长（open-close 配对）
+        today_evt_res = (sb.table("app_events")
+                         .select("app_name,event,created_at")
+                         .gte("created_at", f"{today}T00:00:00")
+                         .order("created_at")
+                         .execute())
+        today_evts = today_evt_res.data or []
+        if today_evts:
+            # 简单配对算法
+            open_map: dict = {}
+            totals: dict   = {}
+            for e in today_evts:
+                name = e["app_name"]
+                if e["event"] == "open":
+                    open_map[name] = e["created_at"]
+                elif e["event"] == "close" and name in open_map:
+                    try:
+                        o = datetime.fromisoformat(open_map[name])
+                        c = datetime.fromisoformat(e["created_at"])
+                        totals[name] = totals.get(name, 0) + (c - o).total_seconds()
+                    except Exception:
+                        pass
+                    open_map.pop(name, None)
+            if totals:
+                for name, sec in sorted(totals.items(), key=lambda x: x[1], reverse=True)[:15]:
+                    m, s = divmod(int(sec), 60)
+                    lines.append(f"  {name}：{m}分{s}秒" if m else f"  {name}：{s}秒")
+                total_sec = int(sum(totals.values()))
+                th, tm = divmod(total_sec // 60, 60)
+                lines.append(f"今日合计（事件估算）：{th}小时{tm}分钟" if th else f"今日合计（事件估算）：{tm}分钟")
+            else:
+                lines.append("  今日汇总还未上传（快捷指令尚未定时推送）")
+        else:
+            lines.append("  今日暂无记录")
+
+    return "\n".join(lines)
+
+
+def _check_battery() -> str:
+    """单独查电量工具"""
+    sb = get_sb()
+    if not sb:
+        return "Supabase 未配置"
+    res = (sb.table("battery_logs")
+           .select("level,created_at")
+           .order("created_at", desc=True)
+           .limit(1)
            .execute())
     if not res.data:
-        return (last_line + "\n今日暂无使用记录").strip()
+        return "🔋 暂无电量数据（自动化还未推送过）"
+    row   = res.data[0]
+    level = row["level"]
+    try:
+        ts = datetime.fromisoformat(row["created_at"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=TZ8)
+        elapsed = (datetime.now(TZ8) - ts.astimezone(TZ8)).total_seconds() / 60
+        if elapsed < 1:
+            ago = "刚刚"
+        elif elapsed < 60:
+            ago = f"{int(elapsed)} 分钟前"
+        else:
+            ago = f"{int(elapsed/60)} 小时前上报"
+    except Exception:
+        ago = "未知时间"
 
-    totals: dict = {}
-    for r in res.data:
-        sec = float(r.get("duration_seconds") or 0)
-        totals[r["app_name"]] = totals.get(r["app_name"], 0) + sec
-
-    lines = []
-    if last_line:
-        lines.append(last_line)
-    lines.append("今日各 App 使用时长：")
-    for name, sec in sorted(totals.items(), key=lambda x: x[1], reverse=True)[:15]:
-        m, s = divmod(int(sec), 60)
-        lines.append(f"  {name}：{m}分{s}秒" if m else f"  {name}：{s}秒")
-    total_sec = int(sum(totals.values()))
-    total_h, total_m = divmod(total_sec // 60, 60)
-    lines.append(f"今日合计：{total_h}小时{total_m}分钟" if total_h else f"今日合计：{total_m}分钟")
-    return "\n".join(lines)
+    if level <= 10:
+        emoji = "🪫"
+        note  = " 快没电了！"
+    elif level <= 30:
+        emoji = "🔋⚠️"
+        note  = " 电量偏低"
+    elif level >= 90:
+        emoji = "🔋✅"
+        note  = ""
+    else:
+        emoji = "🔋"
+        note  = ""
+    return f"{emoji} 手机电量：{level}%{note}（{ago}）"
 
 
 def _control_toy(args: dict) -> str:
@@ -781,3 +1053,4 @@ if __name__ == "__main__":
     port = int(os.getenv("MCP_PORT", os.getenv("PORT", "8001")))
     print(f"QI MCP Server :{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
