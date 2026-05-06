@@ -419,27 +419,23 @@ def push_app_event():
         return jsonify({"error": "event 必须是 open 或 close"}), 400
 
     try:
-        # 写入 app_events 事件流
-        sb.table("app_events").insert({
-            "id":         str(uuid.uuid4()),
-            "app_name":   app_name,
-            "event":      event,
-            "created_at": now8(),
-        }).execute()
-
-        # 如果带了电量，顺手写入 battery_logs
+        battery_level = None
         if battery is not None:
             try:
-                level = int(float(str(battery).replace("%", "")))
-                sb.table("battery_logs").insert({
-                    "id":         str(uuid.uuid4()),
-                    "level":      level,
-                    "created_at": now8(),
-                }).execute()
+                battery_level = int(float(str(battery).replace("%", "")))
             except Exception:
                 pass
 
-        _log("push_app_event", f"{app_name} {event}")
+        # 电量直接合并进 app_events，不再单独写 battery_logs
+        sb.table("app_events").insert({
+            "id":            str(uuid.uuid4()),
+            "app_name":      app_name,
+            "event":         event,
+            "battery_level": battery_level,
+            "created_at":    now8(),
+        }).execute()
+
+        _log("push_app_event", f"{app_name} {event} 🔋{battery_level}%")
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -846,14 +842,15 @@ def _check_screentime() -> str:
     else:
         lines.append("📵 暂无 App 使用记录（自动化还未触发过）")
 
-    # ── 电量（battery_logs 最新一条）────────────────────────────────────────
-    bat_res = (sb.table("battery_logs")
-               .select("level,created_at")
+    # ── 电量（app_events 最新一条里的 battery_level）────────────────────────
+    bat_res = (sb.table("app_events")
+               .select("battery_level,created_at")
+               .not_.is_("battery_level", "null")
                .order("created_at", desc=True)
                .limit(1)
                .execute())
     if bat_res.data:
-        level = bat_res.data[0]["level"]
+        level = bat_res.data[0]["battery_level"]
         if level <= 10:
             bat_emoji = "🪫"
         elif level <= 30:
@@ -936,19 +933,20 @@ def _check_screentime() -> str:
 
 
 def _check_battery() -> str:
-    """单独查电量工具"""
+    """单独查电量工具，从 app_events 最新一条带电量的记录里取"""
     sb = get_sb()
     if not sb:
         return "Supabase 未配置"
-    res = (sb.table("battery_logs")
-           .select("level,created_at")
+    res = (sb.table("app_events")
+           .select("battery_level,created_at")
+           .not_.is_("battery_level", "null")
            .order("created_at", desc=True)
            .limit(1)
            .execute())
     if not res.data:
         return "🔋 暂无电量数据（自动化还未推送过）"
     row   = res.data[0]
-    level = row["level"]
+    level = row["battery_level"]
     try:
         ts = datetime.fromisoformat(row["created_at"])
         if ts.tzinfo is None:
@@ -1053,4 +1051,5 @@ if __name__ == "__main__":
     port = int(os.getenv("MCP_PORT", os.getenv("PORT", "8001")))
     print(f"QI MCP Server :{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
