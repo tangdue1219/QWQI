@@ -342,20 +342,69 @@ def push_screentime():
     """
     iOS 快捷指令（定时，如每小时/每天）推送今日各 App 汇总时长。
 
+    iOS「取得今天的 App 与网站活动」会以纯文本输出，格式如：
+      Chrome (1時16分)
+      WeChat (5分)
+      Safari (30秒)
+
     快捷指令配置：
       1. 「取得今天的 App 与网站活动」
       2. 「取得 URL 内容」POST https://域名/push/screentime
-         Body JSON: 上一步的「App 与网站活动」结果原样传入
+         要求内文类型：JSON
+         加入欄位：键 = apps，值 = 活动变量
     """
+    # iOS 传来的可能是 {"apps": "Chrome (1時16分)\nWeChat (5分)\n..."} 纯文本
     data = request.get_json(force=True, silent=True) or {}
     sb = get_sb()
     if not sb:
         return jsonify({"error": "Supabase 未配置"}), 500
+
+    def _parse_ios_screentime(raw: str) -> list[dict]:
+        """
+        解析 iOS 屏幕时间纯文本，返回 [{name, duration_seconds}, ...]
+        支持格式：
+          App名 (X時YY分)  /  App名 (YY分)  /  App名 (YY秒)  /  App名 (X時)
+        """
+        results = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # 匹配括号内时长，兼容中文「時/分/秒」和英文「hr/min/sec」
+            m = re.search(
+                r'^(.+?)\s*\((?:(\d+)\s*[時时hr]+\s*)?(?:(\d+)\s*[分min]+\s*)?(?:(\d+)\s*[秒sec]+\s*)?\)',
+                line
+            )
+            if not m:
+                continue
+            name    = m.group(1).strip()
+            hours   = int(m.group(2) or 0)
+            minutes = int(m.group(3) or 0)
+            seconds = int(m.group(4) or 0)
+            total   = hours * 3600 + minutes * 60 + seconds
+            if name and total > 0:
+                results.append({"name": name, "duration_seconds": float(total)})
+        return results
+
     try:
         today = datetime.now(TZ8).strftime("%Y-%m-%d")
-        apps = data.get("apps") or data.get("application") or []
-        if not isinstance(apps, list):
-            apps = []
+
+        # 取出原始文本，支持两种传法：
+        #   {"apps": "Chrome...\nWeChat..."}   ← 快捷指令 JSON 键值对
+        #   {"apps": [...]}                    ← 万一以后变成数组也兼容
+        raw = data.get("apps") or data.get("application") or ""
+
+        if isinstance(raw, list):
+            # 数组格式（兼容旧逻辑）
+            parsed = []
+            for item in raw:
+                n = (item.get("name") or item.get("bundleIdentifier") or "").strip()
+                d = float(item.get("duration") or item.get("totalDuration") or 0)
+                if n and d > 0:
+                    parsed.append({"name": n, "duration_seconds": d})
+        else:
+            # 纯文本格式（iOS 实际输出）
+            parsed = _parse_ios_screentime(str(raw))
 
         # 删除今天已有的汇总再重写（保持幂等）
         sb.table("screentime_daily") \
@@ -364,17 +413,14 @@ def push_screentime():
           .execute()
 
         rows = []
-        for item in apps:
-            name = (item.get("name") or item.get("bundleIdentifier") or "").strip()
-            duration = float(item.get("duration") or item.get("totalDuration") or 0)
-            if name and duration > 0:
-                rows.append({
-                    "id":               str(uuid.uuid4()),
-                    "date":             today,
-                    "app_name":         name,
-                    "duration_seconds": duration,
-                    "created_at":       now8(),
-                })
+        for item in parsed:
+            rows.append({
+                "id":               str(uuid.uuid4()),
+                "date":             today,
+                "app_name":         item["name"],
+                "duration_seconds": item["duration_seconds"],
+                "created_at":       now8(),
+            })
         if rows:
             sb.table("screentime_daily").insert(rows).execute()
 
@@ -1053,3 +1099,57 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port, debug=False)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Supabase 新增表 DDL（首次部署时执行一次）
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# -- 模块一：iOS 快捷指令定时推送今日 App 汇总时长
+# create table screentime_daily (
+#   id               uuid primary key,
+#   date             date not null,          -- 'YYYY-MM-DD'
+#   app_name         text not null,
+#   duration_seconds float not null,
+#   created_at       timestamp
+# );
+# create index on screentime_daily (date);
+#
+# -- 模块二：App open/close 实时事件流（含电量，合并一张表）
+# create table app_events (
+#   id            uuid primary key,
+#   event         text not null check (event in ('open','close')),
+#   app_name      text not null,
+#   battery_level integer,       -- open/close 时顺带记录，可为 null
+#   created_at    timestamp
+# );
+# create index on app_events (created_at desc);
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# iOS 快捷指令 / 自动化配置速查
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 【模块一 — 定时汇总，每小时或每天建一条自动化】
+#   触发：时间 → 每小时（或每天早上固定时间）
+#   步骤1：取得今天的 App 与网站活动
+#   步骤2：取得 URL 内容
+#           URL: https://你的域名/push/screentime
+#           方法: POST
+#           请求正文类型: JSON
+#           正文: 步骤1 的结果（直接选变量）
+#
+# 【模块二 — 实时事件，每个 App 建两条自动化】
+#   触发A：App「微信」已打开
+#     步骤1：取得电池电量  → 存为变量 battery
+#     步骤2：取得 URL 内容
+#             URL: https://你的域名/push/app_event
+#             方法: POST
+#             正文 JSON: {"app": "微信", "event": "open", "battery": battery}
+#
+#   触发B：App「微信」已关闭
+#     步骤1：取得电池电量  → 存为变量 battery
+#     步骤2：取得 URL 内容
+#             URL: https://你的域名/push/app_event
+#             方法: POST
+#             正文 JSON: {"app": "微信", "event": "close", "battery": battery}
+#
+#   （微信换成小红书、抖音等，每个 App 重复建一遍）
+# ═══════════════════════════════════════════════════════════════════════════
