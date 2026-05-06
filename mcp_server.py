@@ -557,6 +557,8 @@ def _read_diary(args: dict) -> str:
 
 
 def _write_memory_event(args: dict) -> str:
+    if not (args.get("content_summary") or "").strip():
+        return "错误：content_summary 不能为空，请在 tool_args 里填写具体的记忆摘要内容后重新调用"
     sb = get_sb()
     text = " ".join(filter(None, [args.get("content_summary"), args.get("content_detail")]))
     row = {
