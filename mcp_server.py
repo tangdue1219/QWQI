@@ -424,7 +424,6 @@ def push_screentime():
         if rows:
             sb.table("screentime_daily").insert(rows).execute()
 
-        _log("push_screentime", f"{today} 推送 {len(rows)} 条 App 时长")
         return jsonify({"status": "ok", "apps_count": len(rows)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -487,7 +486,6 @@ def push_app_event():
             "created_at":    now8(),
         }).execute()
 
-        _log("push_app_event", f"{app_name} {event} 🔋{battery_level}%")
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
