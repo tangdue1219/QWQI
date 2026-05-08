@@ -19,11 +19,6 @@ mcp_server.py — QI MCP 工具服务器
   check_du_status / check_screentime / check_battery / control_toy
   send_email / read_emails
 
-Supabase 新增表（见末尾注释）：
-  screentime_daily  — 模块一每日汇总
-  app_events        — 模块二 open/close 事件流
-  battery_logs      — 电量上报
-
 角色约定：raw_conversations.role 用 du/qi（兼容旧 user/assistant）
 """
 
@@ -287,24 +282,14 @@ def push_app_event():
 
     快捷指令配置（每个 App 建两条自动化）：
       触发：微信「已打开」
-        「取得电池电量」→ 变量 battery
         「取得 URL 内容」
           URL: https://域名/push/app_event?app=微信&event=open&battery=battery变量
           方式: GET
-
-      触发：微信「已关闭」
-        「取得电池电量」→ 变量 battery
-        「取得 URL 内容」
-          URL: https://域名/push/app_event?app=微信&event=close&battery=battery变量
-          方式: GET
-
-    battery 字段可选（没有也能工作），有的话顺带存电量。
     """
     # 同时支持 URL 参数（GET）和 JSON body（POST），URL 参数优先
     data     = request.get_json(force=True, silent=True) or {}
     app_name = (request.args.get("app") or data.get("app") or data.get("app_name") or "").strip()
     event    = (request.args.get("event") or data.get("event") or "open").strip().lower()
-    battery  = request.args.get("battery") or data.get("battery")
 
     sb = get_sb()
     if not sb:
@@ -363,24 +348,6 @@ def _post_moment(args: dict) -> str:
         sb.table("moments").insert(row).execute()
         _log("post_moment", f"发布动态：{row['content'][:50]}")
     return "动态已发布"
-
-
-def _add_memo(args: dict) -> str:
-    sb = get_sb()
-    row = {
-        "id":        str(uuid.uuid4()),
-        "content":   args.get("content", ""),
-        "frequency": args.get("frequency", "once"),
-        "status":    "pending",
-        "author":    "qi",
-        "importance":5,
-        "created_at":now8(),
-    }
-    if sb:
-        sb.table("memory_memo").insert(row).execute()
-        _log("add_memo", f"记下备忘：{row['content'][:50]}")
-    return "备忘已记录"
-
 
 def _list_books(args: dict) -> str:
     sb = get_sb()
