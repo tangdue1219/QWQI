@@ -321,13 +321,6 @@ def push_app_event():
         return jsonify({"error": "event 必须是 open 或 close"}), 400
 
     try:
-        battery_level = None
-        if battery is not None:
-            try:
-                battery_level = int(float(str(battery).replace("%", "")))
-            except Exception:
-                pass
-
         sb.table("app_events").insert({
             "id":            str(uuid.uuid4()),
             "app_name":      app_name,
