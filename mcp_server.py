@@ -557,6 +557,15 @@ async def handle_messages(scope, receive, send):
     await sse_transport.handle_post_message(scope, receive, send)
 
 
+starlette_app = Starlette(
+    routes=[
+        Route("/",                health_endpoint),
+        Route("/push/screentime", push_screentime_endpoint, methods=["POST"]),
+        Route("/push/app_event",  push_app_event_endpoint,  methods=["GET", "POST"]),
+    ]
+)
+
+
 async def asgi_app(scope, receive, send):
     if scope["type"] == "http":
         path = scope.get("path", "")
@@ -567,15 +576,6 @@ async def asgi_app(scope, receive, send):
             await handle_messages(scope, receive, send)
             return
     await starlette_app(scope, receive, send)
-
-
-starlette_app = Starlette(
-    routes=[
-        Route("/",                health_endpoint),
-        Route("/push/screentime", push_screentime_endpoint, methods=["POST"]),
-        Route("/push/app_event",  push_app_event_endpoint,  methods=["GET", "POST"]),
-    ]
-)
 
 
 # ── 入口 ───────────────────────────────────────────────────────────────────
