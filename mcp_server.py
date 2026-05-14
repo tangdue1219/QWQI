@@ -343,7 +343,7 @@ async def handle_messages(scope, receive, send):
 
 starlette_app = Starlette(
     routes=[
-        Route("/",                health_endpoint),
+        Route("/",                health_endpoint,          methods=["GET", "POST"]),
         Route("/push/screentime", push_screentime_endpoint, methods=["POST"]),
         Route("/push/app_event",  push_app_event_endpoint,  methods=["GET", "POST"]),
     ],
