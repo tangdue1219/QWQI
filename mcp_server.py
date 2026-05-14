@@ -26,7 +26,7 @@ Claude Desktop / 客户端配置（SSE）：
 
 from __future__ import annotations
 
-import os, json, uuid, re, base64 as b64
+import os, json, base64 as b64
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -76,73 +76,6 @@ server = Server("qi-mcp")
 async def list_tools() -> list[types.Tool]:
     return [
         types.Tool(
-            name="post_moment",
-            description="在朋友圈发一条动态",
-            inputSchema={
-                "type": "object",
-                "required": ["content"],
-                "properties": {"content": {"type": "string", "description": "动态内容"}},
-            },
-        ),
-        types.Tool(
-            name="read_moments",
-            description="查看朋友圈动态（含评论和 id）",
-            inputSchema={
-                "type": "object",
-                "properties": {"limit": {"type": "integer", "default": 10, "description": "返回条数"}},
-            },
-        ),
-        types.Tool(
-            name="reply_moment_comment",
-            description="在动态下发评论或回复",
-            inputSchema={
-                "type": "object",
-                "required": ["moment_id", "content"],
-                "properties": {
-                    "moment_id":   {"type": "string"},
-                    "content":     {"type": "string"},
-                    "reply_to_id": {"type": "string", "description": "被回复的评论 id（可选）"},
-                },
-            },
-        ),
-        types.Tool(
-            name="list_books",
-            description="查看书架（含书籍 id）",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="read_book_chapter",
-            description="读书籍某章内容",
-            inputSchema={
-                "type": "object",
-                "required": ["book_id"],
-                "properties": {
-                    "book_id":     {"type": "string"},
-                    "chapter_num": {"type": "integer", "default": 1},
-                },
-            },
-        ),
-        types.Tool(
-            name="check_coread_pending",
-            description="查看渡正在读的书和章节（渡翻到新章且棲还没有批注时会出现）",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="write_book_annotation",
-            description="在书籍某章某段落写棲的批注",
-            inputSchema={
-                "type": "object",
-                "required": ["book_id", "chapter_num", "paragraph_idx", "paragraph_text", "content"],
-                "properties": {
-                    "book_id":        {"type": "string"},
-                    "chapter_num":    {"type": "integer"},
-                    "paragraph_idx":  {"type": "integer", "description": "段落索引（从 0 开始）"},
-                    "paragraph_text": {"type": "string", "description": "被批注的段落原文（取前 100 字）"},
-                    "content":        {"type": "string", "description": "批注内容"},
-                },
-            },
-        ),
-        types.Tool(
             name="control_toy",
             description="控制玩具（震动 / 吸吮 / 伸缩），数值 0 表示关闭",
             inputSchema={
@@ -186,13 +119,6 @@ async def list_tools() -> list[types.Tool]:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     handlers = {
-        "post_moment":           _post_moment,
-        "read_moments":          _read_moments,
-        "reply_moment_comment":  _reply_moment_comment,
-        "list_books":            _list_books,
-        "read_book_chapter":     _read_book_chapter,
-        "check_coread_pending":  _check_coread_pending,
-        "write_book_annotation": _write_book_annotation,
         "control_toy":           _control_toy,
         "send_email":            _send_email,
         "read_emails":           lambda a: _read_emails(int(a.get("limit", 5))),
@@ -209,175 +135,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
 
 # ── 工具实现 ───────────────────────────────────────────────────────────────
-
-def _post_moment(args: dict) -> str:
-    sb = get_sb()
-    row = {
-        "id": str(uuid.uuid4()),
-        "content": args.get("content", ""),
-        "author": "qi",
-        "created_at": now8(),
-    }
-    if sb:
-        sb.table("moments").insert(row).execute()
-    return "动态已发布"
-
-
-def _read_moments(args: dict) -> str:
-    sb = get_sb()
-    if not sb:
-        return "Supabase 未配置"
-    limit = int(args.get("limit", 10))
-    res = (
-        sb.table("moments")
-        .select("id,content,author,created_at")
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    moments = res.data or []
-    if not moments:
-        return "还没有动态。"
-    results = []
-    for m in moments:
-        cres = (
-            sb.table("moment_comments")
-            .select("*")
-            .eq("moment_id", m["id"])
-            .order("created_at")
-            .execute()
-        )
-        coms = cres.data or []
-        com_text = ""
-        if coms:
-            com_text = "\n" + "\n".join(
-                f"  {'棲' if c['author']=='qi' else '渡'}"
-                f"{'回复@'+('棲' if c.get('reply_to_author')=='qi' else '渡') if c.get('reply_to_author') else ''}："
-                f"{c['content']} [id:{c['id']}]"
-                for c in coms
-            )
-        results.append(
-            f"[{m['created_at'][:10]}] [id:{m['id']}] "
-            f"{'棲' if m['author']=='qi' else '渡'}：{m['content']}{com_text}"
-        )
-    return "\n\n".join(results)
-
-
-def _reply_moment_comment(args: dict) -> str:
-    sb = get_sb()
-    row = {
-        "id":              str(uuid.uuid4()),
-        "moment_id":       args.get("moment_id", ""),
-        "content":         args.get("content", ""),
-        "author":          "qi",
-        "reply_to_id":     args.get("reply_to_id") or None,
-        "reply_to_author": None,
-        "created_at":      now8(),
-    }
-    if sb:
-        sb.table("moment_comments").insert(row).execute()
-    return "已发布评论"
-
-
-def _list_books(args: dict) -> str:
-    sb = get_sb()
-    if not sb:
-        return "Supabase 未配置"
-    res = (
-        sb.table("books")
-        .select("id,title,author,total_chapters,progress")
-        .order("created_at", desc=True)
-        .limit(20)
-        .execute()
-    )
-    books = res.data or []
-    if not books:
-        return "书架上没有书籍。"
-    return "\n".join(
-        f"[id:{b['id']}] 《{b['title']}》- {b['author']} 共{b['total_chapters']}章 进度{b['progress']}%"
-        for b in books
-    )
-
-
-def _read_book_chapter(args: dict) -> str:
-    sb = get_sb()
-    if not sb:
-        return "Supabase 未配置"
-    book_id = args.get("book_id", "")
-    num = int(args.get("chapter_num", 1))
-    book_res = sb.table("books").select("title,total_chapters").eq("id", book_id).single().execute()
-    if not book_res.data:
-        return f"找不到书籍 id={book_id}"
-    book = book_res.data
-    ch_res = (
-        sb.table("book_chapters")
-        .select("title,content")
-        .eq("book_id", book_id)
-        .eq("chapter_num", num)
-        .single()
-        .execute()
-    )
-    if not ch_res.data:
-        return f"《{book['title']}》没有第{num}章（共{book['total_chapters']}章）"
-    ch = ch_res.data
-    content = ch.get("content", "")
-    ch_title = ch.get("title", f"第{num}章")
-    excerpt = content[:2000]
-    truncated = len(content) > 2000
-    return (
-        f"《{book['title']}》{ch_title}（第{num}章/共{book['total_chapters']}章）\n"
-        f"{excerpt}{'…（截断）' if truncated else ''}"
-    )
-
-
-def _check_coread_pending(args: dict) -> str:
-    sb = get_sb()
-    if not sb:
-        return "Supabase 未配置"
-    res = (
-        sb.table("book_progress")
-        .select("book_id,current_chapter,updated_at")
-        .eq("reader", "qi_pending")
-        .execute()
-    )
-    rows = res.data or []
-    if not rows:
-        return "暂无待共读章节。"
-    results = []
-    for r in rows:
-        book_res = sb.table("books").select("title").eq("id", r["book_id"]).single().execute()
-        title = book_res.data.get("title", r["book_id"]) if book_res.data else r["book_id"]
-        results.append(f"《{title}》第{r['current_chapter']}章（渡 {r['updated_at'][:16]} 翻到这里）")
-    return "渡正在读：\n" + "\n".join(results)
-
-
-def _write_book_annotation(args: dict) -> str:
-    sb = get_sb()
-    if not sb:
-        return "Supabase 未配置"
-    book_id = args.get("book_id", "")
-    chapter_num = int(args.get("chapter_num", 1))
-    paragraph_idx = int(args.get("paragraph_idx", 0))
-    paragraph_text = str(args.get("paragraph_text", ""))[:200]
-    content = args.get("content", "").strip()
-    if not content:
-        return "TOOL_ERROR: content 不能为空"
-    sb.table("book_annotations").insert({
-        "book_id":        book_id,
-        "chapter_num":    chapter_num,
-        "paragraph_idx":  paragraph_idx,
-        "paragraph_text": paragraph_text,
-        "author":         "qi",
-        "content":        content,
-        "created_at":     now8(),
-    }).execute()
-    sb.table("book_progress").delete().eq("book_id", book_id).eq("reader", "qi_pending").execute()
-    sb.table("book_progress").upsert(
-        {"book_id": book_id, "reader": "qi", "current_chapter": chapter_num, "updated_at": now8()},
-        upsert_keys=["book_id", "reader"],
-    ).execute()
-    return f"TOOL_OK: 批注已写入第{chapter_num}章第{paragraph_idx}段"
-
 
 def _control_toy(args: dict) -> str:
     sb = get_sb()
