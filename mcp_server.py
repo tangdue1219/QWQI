@@ -35,6 +35,8 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp import types
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import Response
@@ -319,7 +321,15 @@ starlette_app = Starlette(
         Route("/",                health_endpoint),
         Route("/push/screentime", push_screentime_endpoint, methods=["POST"]),
         Route("/push/app_event",  push_app_event_endpoint,  methods=["GET", "POST"]),
-    ]
+    ],
+    middleware=[
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    ],
 )
 
 
