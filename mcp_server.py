@@ -293,8 +293,35 @@ async def push_app_event_endpoint(request: Request):
 
 
 async def health_endpoint(request: Request):
-    from starlette.responses import JSONResponse
-    return JSONResponse({"status": "ok", "service": "qi-mcp", "protocol": "MCP/SSE"})
+    from starlette.responses import JSONResponse, Response
+    # GET → health check；POST → MCP JSON-RPC（供前端 HTTP transport 用）
+    if request.method != "POST":
+        return JSONResponse({"status": "ok", "service": "qi-mcp", "protocol": "MCP/SSE"})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+            "error": {"code": -32700, "message": "parse error"}}, status_code=400)
+    method  = body.get("method", "")
+    req_id  = body.get("id")
+    if method == "initialize":
+        return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": {
+            "protocolVersion": body.get("params", {}).get("protocolVersion", "2024-11-05"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "qi-mcp", "version": "1.0"},
+        }})
+    if method == "notifications/initialized":
+        return Response(status_code=202)
+    if method == "tools/list":
+        tools_list = await list_tools()
+        return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": {
+            "tools": [
+                {"name": t.name, "description": t.description, "inputSchema": t.inputSchema}
+                for t in tools_list
+            ]
+        }})
+    return JSONResponse({"jsonrpc": "2.0", "id": req_id,
+        "error": {"code": -32601, "message": f"method not found: {method}"}})
 
 
 # ── Starlette 应用（SSE 传输） ─────────────────────────────────────────────
