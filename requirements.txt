@@ -1,8 +1,7 @@
-flask>=3.0
-flask-cors>=4.0
+mcp>=1.0
+uvicorn>=0.29
 python-dotenv>=1.0
 supabase>=2.0
 google-auth>=2.0
 google-auth-oauthlib>=1.2
 google-api-python-client>=2.0
-gunicorn>=21.0

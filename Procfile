@@ -1,1 +1,1 @@
-web: gunicorn mcp_server:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 4
+web: uvicorn mcp_server:starlette_app --host 0.0.0.0 --port $PORT
