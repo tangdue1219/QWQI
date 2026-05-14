@@ -37,6 +37,7 @@ from mcp import types
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
+from starlette.responses import Response
 import uvicorn
 
 load_dotenv()
@@ -544,25 +545,33 @@ async def health_endpoint(request: Request):
 sse_transport = SseServerTransport("/messages/")
 
 
-async def handle_sse(request: Request):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
+async def handle_sse(scope, receive, send):
+    async with sse_transport.connect_sse(scope, receive, send) as streams:
         await server.run(
             streams[0], streams[1],
             server.create_initialization_options(),
         )
 
 
-async def handle_messages(request: Request):
-    await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+async def handle_messages(scope, receive, send):
+    await sse_transport.handle_post_message(scope, receive, send)
+
+
+async def asgi_app(scope, receive, send):
+    if scope["type"] == "http":
+        path = scope.get("path", "")
+        if path == "/sse":
+            await handle_sse(scope, receive, send)
+            return
+        if path.startswith("/messages"):
+            await handle_messages(scope, receive, send)
+            return
+    await starlette_app(scope, receive, send)
 
 
 starlette_app = Starlette(
     routes=[
         Route("/",                health_endpoint),
-        Route("/sse",             handle_sse),
-        Route("/messages/",       handle_messages, methods=["POST"]),
         Route("/push/screentime", push_screentime_endpoint, methods=["POST"]),
         Route("/push/app_event",  push_app_event_endpoint,  methods=["GET", "POST"]),
     ]
@@ -575,4 +584,4 @@ if __name__ == "__main__":
     port = int(os.getenv("MCP_PORT", os.getenv("PORT", "8001")))
     print(f"QI MCP Server (SSE) :{port}")
     print(f"SSE endpoint : http://0.0.0.0:{port}/sse")
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    uvicorn.run(asgi_app, host="0.0.0.0", port=port)
