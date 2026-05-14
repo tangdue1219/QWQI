@@ -35,7 +35,7 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp import types
 from starlette.applications import Starlette
-from starlette.routing import Route, Mount
+from starlette.routing import Route
 from starlette.requests import Request
 import uvicorn
 
@@ -541,7 +541,7 @@ async def health_endpoint(request: Request):
 
 # ── Starlette 应用（SSE 传输） ─────────────────────────────────────────────
 
-sse_transport = SseServerTransport("/messages")
+sse_transport = SseServerTransport("/messages/")
 
 
 async def handle_sse(request: Request):
@@ -554,11 +554,15 @@ async def handle_sse(request: Request):
         )
 
 
+async def handle_messages(request: Request):
+    await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+
+
 starlette_app = Starlette(
     routes=[
-        Route("/",               health_endpoint),
-        Route("/sse",            handle_sse),
-        Mount("/messages",       app=sse_transport.handle_post_message),
+        Route("/",                health_endpoint),
+        Route("/sse",             handle_sse),
+        Route("/messages/",       handle_messages, methods=["POST"]),
         Route("/push/screentime", push_screentime_endpoint, methods=["POST"]),
         Route("/push/app_event",  push_app_event_endpoint,  methods=["GET", "POST"]),
     ]
