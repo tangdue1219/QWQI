@@ -322,18 +322,10 @@ starlette_app = Starlette(
         Route("/push/screentime", push_screentime_endpoint, methods=["POST"]),
         Route("/push/app_event",  push_app_event_endpoint,  methods=["GET", "POST"]),
     ],
-    middleware=[
-        Middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-    ],
 )
 
 
-async def asgi_app(scope, receive, send):
+async def _asgi_inner(scope, receive, send):
     if scope["type"] == "http":
         path = scope.get("path", "")
         if path == "/sse":
@@ -343,6 +335,15 @@ async def asgi_app(scope, receive, send):
             await handle_messages(scope, receive, send)
             return
     await starlette_app(scope, receive, send)
+
+
+# CORS を /sse・/messages も含む全ルートに適用
+asgi_app = CORSMiddleware(
+    app=_asgi_inner,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── 入口 ───────────────────────────────────────────────────────────────────
