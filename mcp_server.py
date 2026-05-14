@@ -35,8 +35,6 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp import types
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import Response
@@ -324,26 +322,40 @@ starlette_app = Starlette(
     ],
 )
 
+CORS_HEADERS = [
+    (b"access-control-allow-origin",  b"*"),
+    (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
+    (b"access-control-allow-headers", b"*"),
+]
 
-async def _asgi_inner(scope, receive, send):
+async def asgi_app(scope, receive, send):
     if scope["type"] == "http":
         path = scope.get("path", "")
+
+        # CORS preflight
+        method = scope.get("method", "")
+        if method == "OPTIONS":
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": CORS_HEADERS + [(b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        # 给所有响应注入 CORS 头
+        async def send_cors(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", [])) + CORS_HEADERS
+                message = {**message, "headers": headers}
+            await send(message)
+
         if path == "/sse":
-            await handle_sse(scope, receive, send)
+            await handle_sse(scope, receive, send_cors)
             return
         if path.startswith("/messages"):
-            await handle_messages(scope, receive, send)
+            await handle_messages(scope, receive, send_cors)
             return
-    await starlette_app(scope, receive, send)
-
-
-# CORS を /sse・/messages も含む全ルートに適用
-asgi_app = CORSMiddleware(
-    app=_asgi_inner,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+        await starlette_app(scope, receive, send_cors)
+    else:
+        await starlette_app(scope, receive, send)
 
 
 # ── 入口 ───────────────────────────────────────────────────────────────────
