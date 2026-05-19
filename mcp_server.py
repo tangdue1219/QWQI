@@ -26,7 +26,7 @@ Claude Desktop / 客户端配置（SSE）：
 
 from __future__ import annotations
 
-import os, json, base64 as b64
+import os, json, base64 as b64, uuid, re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -113,47 +113,7 @@ async def list_tools() -> list[types.Tool]:
         ),
     ]
 
-# ── 模块二：iOS 自动化推送 App open/close 事件 + 电量 ─────────────────────
 
-@app.route("/push/app_event", methods=["GET", "POST"])
-def push_app_event():
-    """
-    iOS 自动化（每个 App「已打开」/「已关闭」触发）推送实时事件。
-
-    推荐用 URL 参数传递（最简单，不依赖 JSON 格式）：
-      https://域名/push/app_event?app=微信&event=open
-
-    快捷指令配置（每个 App 建两条自动化）：
-      触发：微信「已打开」
-        「取得 URL 内容」
-          URL: https://域名/push/app_event?app=微信&event=open
-          方式: GET
-    """
-    # 同时支持 URL 参数（GET）和 JSON body（POST），URL 参数优先
-    data     = request.get_json(force=True, silent=True) or {}
-    app_name = (request.args.get("app") or data.get("app") or data.get("app_name") or "").strip()
-    event    = (request.args.get("event") or data.get("event") or "open").strip().lower()
-
-    sb = get_sb()
-    if not sb:
-        return jsonify({"error": "Supabase 未配置"}), 500
-
-    if not app_name:
-        return jsonify({"error": "缺少 app 字段"}), 400
-    if event not in ("open", "close"):
-        return jsonify({"error": "event 必须是 open 或 close"}), 400
-
-    try:
-        sb.table("app_events").insert({
-            "id":            str(uuid.uuid4()),
-            "app_name":      app_name,
-            "event":         event,
-            "created_at":    now8(),
-        }).execute()
-
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 # ── 工具调用入口 ───────────────────────────────────────────────────────────
 
