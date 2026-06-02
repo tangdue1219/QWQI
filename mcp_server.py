@@ -91,8 +91,25 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="list_contacts",
+            description="查看联系人列表，发邮件前先调这个查收件人邮箱",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="add_contact",
+            description="新增邮箱联系人",
+            inputSchema={
+                "type": "object",
+                "required": ["name", "email"],
+                "properties": {
+                    "name":  {"type": "string", "description": "备注名"},
+                    "email": {"type": "string", "description": "邮箱地址"},
+                },
+            },
+        ),
+        types.Tool(
             name="send_email",
-            description="通过 Gmail 发邮件",
+            description="通过 Gmail 发邮件（发之前先用 list_contacts 查邮箱地址）",
             inputSchema={
                 "type": "object",
                 "required": ["to", "subject", "body"],
@@ -121,6 +138,8 @@ async def list_tools() -> list[types.Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     handlers = {
         "control_toy":           _control_toy,
+        "list_contacts":         lambda a: _list_contacts(),
+        "add_contact":           _add_contact,
         "send_email":            _send_email,
         "read_emails":           lambda a: _read_emails(int(a.get("limit", 5))),
     }
@@ -154,6 +173,35 @@ def _control_toy(args: dict) -> str:
     }).execute()
     active = ", ".join(f"{k}={v}" for k, v in params.items() if v)
     return f"指令已发送：{active or '全部关闭'}"
+
+
+def _list_contacts() -> str:
+    sb = get_sb()
+    if not sb:
+        return "Supabase 未配置"
+    try:
+        res = sb.table("contacts").select("name, email").order("name").execute()
+        rows = res.data or []
+        if not rows:
+            return "联系人列表为空"
+        return "\n".join(f"{r['name']} → {r['email']}" for r in rows)
+    except Exception as e:
+        return f"查询联系人失败：{e}"
+
+
+def _add_contact(args: dict) -> str:
+    sb = get_sb()
+    if not sb:
+        return "Supabase 未配置"
+    name = (args.get("name") or "").strip()
+    email = (args.get("email") or "").strip()
+    if not name or not email:
+        return "缺少参数（name / email）"
+    try:
+        sb.table("contacts").insert({"name": name, "email": email}).execute()
+        return f"已添加联系人：{name} → {email}"
+    except Exception as e:
+        return f"添加失败：{e}"
 
 
 def _get_gmail_service():
