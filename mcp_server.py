@@ -109,12 +109,12 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="send_email",
-            description="通过 Gmail 发邮件（发之前先用 list_contacts 查邮箱地址）",
+            description="通过 Gmail 发邮件。to 可以填邮箱地址或联系人备注名（会自动从联系人表匹配）。如果匹配不到会返回联系人列表供参考",
             inputSchema={
                 "type": "object",
                 "required": ["to", "subject", "body"],
                 "properties": {
-                    "to":      {"type": "string"},
+                    "to":      {"type": "string", "description": "收件人邮箱地址或联系人备注名"},
                     "subject": {"type": "string"},
                     "body":    {"type": "string"},
                 },
@@ -227,6 +227,31 @@ def _send_email(args: dict) -> str:
     to, subject, body = args.get("to"), args.get("subject"), args.get("body")
     if not (to and subject and body):
         return "缺少参数（to / subject / body）"
+
+    # ── 自动解析收件人：如果不像邮箱格式，就当备注名去联系人表查 ──
+    if "@" not in to:
+        sb = get_sb()
+        if not sb:
+            return "Supabase 未配置，无法查询联系人"
+        try:
+            # 模糊匹配备注名（不区分大小写）
+            res = sb.table("contacts").select("name, email").execute()
+            rows = res.data or []
+            query = to.strip().lower()
+            matched = [r for r in rows if query in r["name"].lower()]
+            if len(matched) == 1:
+                to = matched[0]["email"]
+            elif len(matched) > 1:
+                options = "\n".join(f"  · {r['name']} → {r['email']}" for r in matched)
+                return f"找到多个匹配联系人，请指定：\n{options}"
+            else:
+                if rows:
+                    contact_list = "\n".join(f"  · {r['name']} → {r['email']}" for r in rows)
+                    return f"找不到名为「{args.get('to')}」的联系人。现有联系人：\n{contact_list}"
+                return f"找不到名为「{args.get('to')}」的联系人，且联系人列表为空。请用 add_contact 先添加"
+        except Exception as e:
+            return f"查询联系人失败：{e}"
+
     service = _get_gmail_service()
     msg = MIMEText(body)
     msg["to"] = to
