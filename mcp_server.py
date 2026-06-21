@@ -20,13 +20,12 @@ Claude Desktop / 客户端配置（SSE）：
 
 环境变量：
   SUPABASE_URL / SUPABASE_KEY
-  GMAIL_TOKEN   (JSON 字符串)
   MCP_PORT      (默认 8001)
 """
 
 from __future__ import annotations
 
-import os, json, base64 as b64, uuid, re
+import os, json, uuid, re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -90,44 +89,6 @@ async def list_tools() -> list[types.Tool]:
                 },
             },
         ),
-        types.Tool(
-            name="list_contacts",
-            description="查看联系人列表，发邮件前先调这个查收件人邮箱",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="add_contact",
-            description="新增邮箱联系人",
-            inputSchema={
-                "type": "object",
-                "required": ["name", "email"],
-                "properties": {
-                    "name":  {"type": "string", "description": "备注名"},
-                    "email": {"type": "string", "description": "邮箱地址"},
-                },
-            },
-        ),
-        types.Tool(
-            name="send_email",
-            description="通过 Gmail 发邮件。to 可以填邮箱地址或联系人备注名（会自动从联系人表匹配）。如果匹配不到会返回联系人列表供参考",
-            inputSchema={
-                "type": "object",
-                "required": ["to", "subject", "body"],
-                "properties": {
-                    "to":      {"type": "string", "description": "收件人邮箱地址或联系人备注名"},
-                    "subject": {"type": "string"},
-                    "body":    {"type": "string"},
-                },
-            },
-        ),
-        types.Tool(
-            name="read_emails",
-            description="读取 Gmail 最新邮件",
-            inputSchema={
-                "type": "object",
-                "properties": {"limit": {"type": "integer", "default": 5}},
-            },
-        ),
     ]
 
 
@@ -138,10 +99,6 @@ async def list_tools() -> list[types.Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     handlers = {
         "control_toy":           _control_toy,
-        "list_contacts":         lambda a: _list_contacts(),
-        "add_contact":           _add_contact,
-        "send_email":            _send_email,
-        "read_emails":           lambda a: _read_emails(int(a.get("limit", 5))),
     }
     fn = handlers.get(name)
     if fn is None:
@@ -173,113 +130,6 @@ def _control_toy(args: dict) -> str:
     }).execute()
     active = ", ".join(f"{k}={v}" for k, v in params.items() if v)
     return f"指令已发送：{active or '全部关闭'}"
-
-
-def _list_contacts() -> str:
-    sb = get_sb()
-    if not sb:
-        return "Supabase 未配置"
-    try:
-        res = sb.table("contacts").select("name, email").order("name").execute()
-        rows = res.data or []
-        if not rows:
-            return "联系人列表为空"
-        return "\n".join(f"{r['name']} → {r['email']}" for r in rows)
-    except Exception as e:
-        return f"查询联系人失败：{e}"
-
-
-def _add_contact(args: dict) -> str:
-    sb = get_sb()
-    if not sb:
-        return "Supabase 未配置"
-    name = (args.get("name") or "").strip()
-    email = (args.get("email") or "").strip()
-    if not name or not email:
-        return "缺少参数（name / email）"
-    try:
-        sb.table("contacts").insert({"name": name, "email": email}).execute()
-        return f"已添加联系人：{name} → {email}"
-    except Exception as e:
-        return f"添加失败：{e}"
-
-
-def _get_gmail_service():
-    token_json = os.getenv("GMAIL_TOKEN", "")
-    if not token_json:
-        raise Exception("GMAIL_TOKEN 未配置")
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-    td = json.loads(token_json)
-    creds = Credentials(
-        token=td.get("token"),
-        refresh_token=td.get("refresh_token"),
-        token_uri=td.get("token_uri", "https://oauth2.googleapis.com/token"),
-        client_id=td.get("client_id"),
-        client_secret=td.get("client_secret"),
-        scopes=td.get("scopes"),
-    )
-    return build("gmail", "v1", credentials=creds)
-
-
-def _send_email(args: dict) -> str:
-    from email.mime.text import MIMEText
-    to, subject, body = args.get("to"), args.get("subject"), args.get("body")
-    if not (to and subject and body):
-        return "缺少参数（to / subject / body）"
-
-    # ── 自动解析收件人：如果不像邮箱格式，就当备注名去联系人表查 ──
-    if "@" not in to:
-        sb = get_sb()
-        if not sb:
-            return "Supabase 未配置，无法查询联系人"
-        try:
-            # 模糊匹配备注名（不区分大小写）
-            res = sb.table("contacts").select("name, email").execute()
-            rows = res.data or []
-            query = to.strip().lower()
-            matched = [r for r in rows if query in r["name"].lower()]
-            if len(matched) == 1:
-                to = matched[0]["email"]
-            elif len(matched) > 1:
-                options = "\n".join(f"  · {r['name']} → {r['email']}" for r in matched)
-                return f"找到多个匹配联系人，请指定：\n{options}"
-            else:
-                if rows:
-                    contact_list = "\n".join(f"  · {r['name']} → {r['email']}" for r in rows)
-                    return f"找不到名为「{args.get('to')}」的联系人。现有联系人：\n{contact_list}"
-                return f"找不到名为「{args.get('to')}」的联系人，且联系人列表为空。请用 add_contact 先添加"
-        except Exception as e:
-            return f"查询联系人失败：{e}"
-
-    service = _get_gmail_service()
-    msg = MIMEText(body)
-    msg["to"] = to
-    msg["subject"] = subject
-    raw = b64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().messages().send(userId="me", body={"raw": raw}).execute()
-    return f"邮件已发送至 {to}"
-
-
-def _read_emails(limit: int = 5) -> str:
-    service = _get_gmail_service()
-    resp = service.users().messages().list(userId="me", maxResults=limit).execute()
-    msgs = resp.get("messages", [])
-    if not msgs:
-        return "暂无邮件"
-    results = []
-    for m in msgs:
-        detail = service.users().messages().get(
-            userId="me", id=m["id"], format="metadata",
-            metadataHeaders=["From", "Subject", "Date"],
-        ).execute()
-        headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
-        results.append(
-            f"发件人：{headers.get('From','')}\n"
-            f"主题：{headers.get('Subject','')}\n"
-            f"时间：{headers.get('Date','')}"
-        )
-    return "\n---\n".join(results)
 
 
 # ── iOS 推送端点（保留，不属于 MCP 协议，作为额外 HTTP 端点） ──────────────
